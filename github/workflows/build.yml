@@ -1,0 +1,135 @@
+
+name: GreenLemon - Tum Pluginleri Derle
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Java 17 Kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Gradle Kur
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: ZIP Dosyalarini Ac ve Derle
+        id: compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p output extracted
+          SUCCESS=0
+          FAILED=0
+          COUNT=0
+
+          while IFS= read -r -d '' ZIP; do
+            COUNT=$((COUNT + 1))
+            NAME=$(basename "$ZIP" .zip)
+            DEST="extracted/${COUNT}_${NAME}"
+
+            echo "================================"
+            echo "ZIP: $NAME"
+            echo "================================"
+
+            mkdir -p "$DEST"
+
+            python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$ZIP" "$DEST"
+
+            FOUND=0
+
+            while IFS= read -r -d '' POM; do
+              FOUND=1
+              DIR=$(dirname "$POM")
+              echo "Maven projesi: $DIR"
+
+              if mvn -B -f "$POM" package; then
+                mkdir -p "output/${COUNT}_${NAME}"
+                find "$DIR/target" -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp {} "output/${COUNT}_${NAME}/" \;
+                SUCCESS=$((SUCCESS + 1))
+              else
+                echo "MAVEN DERLEME HATASI: $NAME"
+                FAILED=$((FAILED + 1))
+              fi
+            done < <(find "$DEST" -type f -name pom.xml -print0)
+
+            if [ "$FOUND" -eq 0 ]; then
+              while IFS= read -r -d '' BUILD; do
+                FOUND=1
+                DIR=$(dirname "$BUILD")
+                echo "Gradle projesi: $DIR"
+
+                if [ -f "$DIR/gradlew" ]; then
+                  chmod +x "$DIR/gradlew"
+                  COMMAND="$DIR/gradlew"
+                else
+                  COMMAND="gradle"
+                fi
+
+                if [ "$COMMAND" = "gradle" ]; then
+                  (cd "$DIR" && gradle build --no-daemon)
+                else
+                  (cd "$DIR" && ./gradlew build --no-daemon)
+                fi
+
+                if [ $? -eq 0 ]; then
+                  mkdir -p "output/${COUNT}_${NAME}"
+                  find "$DIR/build/libs" -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp {} "output/${COUNT}_${NAME}/" \;
+                  SUCCESS=$((SUCCESS + 1))
+                else
+                  echo "GRADLE DERLEME HATASI: $NAME"
+                  FAILED=$((FAILED + 1))
+                fi
+              done < <(find "$DEST" -type f \( -name build.gradle -o -name build.gradle.kts \) -print0)
+            fi
+
+            if [ "$FOUND" -eq 0 ]; then
+              echo "BUILD DOSYASI BULUNAMADI: $NAME"
+              FAILED=$((FAILED + 1))
+            fi
+
+          done < <(find . -type f -iname '*.zip' ! -path './.git/*' ! -path './extracted/*' -print0)
+
+          echo "================================"
+          echo "BASARILI PROJE: $SUCCESS"
+          echo "HATALI PROJE: $FAILED"
+          echo "================================"
+
+          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ZIP DOSYASI BULUNAMADI!"
+            exit 1
+          fi
+
+          if [ "$SUCCESS" -eq 0 ]; then
+            exit 1
+          fi
+
+          if [ "$FAILED" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Tum JAR Dosyalarini Yukle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GreenLemon-Tum-JARlar
+          path: output/**/*.jar
+          if-no-files-found: warn
+          retention-days: 30
+          
